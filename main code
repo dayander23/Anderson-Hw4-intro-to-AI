@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""
+Decision Tree from scratch for 'profitable' car prediction.
+
+- Uses ONLY standard Python libraries (no scikit-learn).
+- Supports two splitting criteria:
+    * Gini Index
+    * Information Gain (entropy-based)
+- Works with categorical attributes.
+- Expects CSV files: trainData.csv, testData.csv
+  with columns: price, maintenance, capacity, airbag, profitable
+"""
+
+import csv
+import math
+import time
+from collections import Counter, defaultdict
+from typing import List, Dict, Tuple, Any
+
+
+# ============================================================
+# Data Loading
+# ============================================================
+
+def load_dataset(path: str, label_col: str = "profitable"
+                 ) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    """
+    Load CSV as list of row dicts (features only) and list of labels.
+
+    Returns:
+        rows:      List[dict] of feature values only (no label)
+        labels:    List of label values in same order as rows
+        features:  List of feature/attribute names (exclude label_col)
+    """
+    rows = []
+    labels = []
+
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        header = reader.fieldnames
+        if header is None:
+            raise ValueError("CSV file has no header row.")
+
+        # feature names = all columns except label
+        features = [c for c in header if c != label_col]
+
+        for line in reader:
+            label = line[label_col]
+            labels.append(label)
+
+            # keep only features in row dict
+            row = {feat: line[feat] for feat in features}
+            rows.append(row)
+
+    return rows, labels, features
+
+
+# ============================================================
+# Impurity Measures
+# ============================================================
+
+def entropy(labels: List[str]) -> float:
+    """Shannon entropy of a list of class labels."""
+    total = len(labels)
+    counts = Counter(labels)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def gini_index(groups: Dict[Any, List[str]], labels: List[str]) -> float:
+    """
+    Gini index for a partition of the dataset.
+
+    groups: dict[value] -> list of labels that fall into this branch
+    labels: all labels before the split
+    """
+    total_samples = len(labels)
+    gini = 0.0
+
+    for group in groups.values():
+        size = len(group)
+        if size == 0:
+            continue
+
+        score = 0.0
+        class_counts = Counter(group)
+        for count in class_counts.values():
+            p = count / size
+            score += p * p
+
+        gini += (1.0 - score) * (size / total_samples)
+
+    return gini
+
+
+def information_gain(parent_labels: List[str],
+                     groups: Dict[Any, List[str]]) -> float:
+    """
+    Information Gain of a partition of the dataset.
+
+    parent_labels: labels before split
+    groups: dict[value] -> list of labels after split
+    """
+    parent_entropy = entropy(parent_labels)
+    total = len(parent_labels)
+
+    weighted_entropy = 0.0
+    for group in groups.values():
+        if len(group) == 0:
+            continue
+        weighted_entropy += (len(group) / total) * entropy(group)
+
+    return parent_entropy - weighted_entropy
+
+
+# ============================================================
+# Decision Tree Node
+# ============================================================
+
+class Node:
+    """
+    A node in the decision tree.
+
+    - If leaf_value is not None -> leaf node with a class label.
+    - Otherwise:
+        * attribute: attribute name used for splitting
+        * branches: dict[value] -> child Node
+    """
+
+    def __init__(self,
+                 attribute: str = None,
+                 branches: Dict[Any, "Node"] = None,
+                 leaf_value: str = None):
+        self.attribute = attribute
+        self.branches = branches or {}
+        self.leaf_value = leaf_value
+
+    def is_leaf(self) -> bool:
+        return self.leaf_value is not None
+
+
+# ============================================================
+# Decision Tree Classifier
+# ============================================================
+
+class DecisionTree:
+    """
+    Decision Tree built from scratch for categorical attributes.
+
+    method:
+        "gini"      -> Gini Index splitting
+        "info-gain" -> Information Gain splitting
+    """
+
+    def __init__(self, method: str = "gini"):
+        assert method in ("gini", "info-gain")
+        self.method = method
+        self.tree: Node = None
+        self.majority_label: str = None   # used as fallback
+
+    # -------------------------
+    # Public API
+    # -------------------------
+
+    def fit(self,
+            data: List[Dict[str, Any]],
+            labels: List[str],
+            attributes: List[str]) -> None:
+        """Build a decision tree from training data."""
+        # default majority label for fallback predictions
+        self.majority_label = Counter(labels).most_common(1)[0][0]
+        self.tree = self._build_tree(data, labels, attributes)
+
+    def predict_one(self, row: Dict[str, Any]) -> str:
+        """Predict the label for a single instance."""
+        node = self.tree
+        while not node.is_leaf():
+            value = row.get(node.attribute)
+            if value in node.branches:
+                node = node.branches[value]
+            else:
+                # unseen attribute value: fallback to overall majority label
+                return self.majority_label
+        return node.leaf_value
+
+    def predict(self, data: List[Dict[str, Any]]) -> List[str]:
+        """Predict labels for a list of instances."""
+        return [self.predict_one(row) for row in data]
+
+    def count_nodes(self, node: Node = None) -> int:
+        """Count total nodes in the tree."""
+        if node is None:
+            node = self.tree
+        if node.is_leaf():
+            return 1
+        return 1 + sum(self.count_nodes(child) for child in node.branches.values())
+
+    # Pretty printing in the required assignment format
+    def pretty_print(self) -> str:
+        return "\n".join(self._print_tree_lines(self.tree))
+
+    # -------------------------
+    # Internal helpers
+    # -------------------------
+
+    def _build_tree(self,
+                    data: List[Dict[str, Any]],
+                    labels: List[str],
+                    attributes: List[str]) -> Node:
+        """Recursively build the decision tree."""
+
+        # If all labels are the same -> leaf node
+        if len(set(labels)) == 1:
+            return Node(leaf_value=labels[0])
+
+        # If no attributes left -> majority vote leaf
+        if not attributes:
+            majority = Counter(labels).most_common(1)[0][0]
+            return Node(leaf_value=majority)
+
+        # Choose best attribute
+        best_attr = self._select_attribute(data, labels, attributes)
+        node = Node(attribute=best_attr, branches={})
+
+        # Partition data by attribute value
+        values = sorted(set(row[best_attr] for row in data))
+        for v in values:
+            child_data = [row for row in data if row[best_attr] == v]
+            child_labels = [labels[i] for i in range(len(data))
+                            if data[i][best_attr] == v]
+
+            if not child_data:
+                # no examples -> leaf with majority label at this node
+                majority = Counter(labels).most_common(1)[0][0]
+                node.branches[v] = Node(leaf_value=majority)
+            else:
+                remaining_attrs = [a for a in attributes if a != best_attr]
+                node.branches[v] = self._build_tree(
+                    child_data, child_labels, remaining_attrs
+                )
+
+        return node
+
+    def _select_attribute(self,
+                          data: List[Dict[str, Any]],
+                          labels: List[str],
+                          attributes: List[str]) -> str:
+        """Select attribute using chosen splitting method."""
+        if self.method == "gini":
+            return self._best_gini_attribute(data, labels, attributes)
+        else:  # "info-gain"
+            return self._best_info_gain_attribute(data, labels, attributes)
+
+    def _best_gini_attribute(self,
+                             data: List[Dict[str, Any]],
+                             labels: List[str],
+                             attributes: List[str]) -> str:
+        best_attr = None
+        best_score = float("inf")
+
+        for attr in attributes:
+            groups = defaultdict(list)
+            for i, row in enumerate(data):
+                groups[row[attr]].append(labels[i])
+            score = gini_index(groups, labels)
+            if score < best_score:
+                best_score = score
+                best_attr = attr
+
+        return best_attr
+
+    def _best_info_gain_attribute(self,
+                                  data: List[Dict[str, Any]],
+                                  labels: List[str],
+                                  attributes: List[str]) -> str:
+        best_attr = None
+        best_gain = -1.0
+
+        for attr in attributes:
+            groups = defaultdict(list)
+            for i, row in enumerate(data):
+                groups[row[attr]].append(labels[i])
+            gain = information_gain(labels, groups)
+            if gain > best_gain:
+                best_gain = gain
+                best_attr = attr
+
+        return best_attr
+
+    # Printing helper (recursive, builds list of lines)
+    def _print_tree_lines(self,
+                          node: Node,
+                          indent: str = "") -> List[str]:
+        lines: List[str] = []
+
+        # internal node
+        for val, child in node.branches.items():
+            if child.is_leaf():
+                # leaf at this branch
+                lines.append(f"{indent}{node.attribute} = {val} : {child.leaf_value}")
+            else:
+                # internal branch
+                lines.append(f"{indent}{node.attribute} = {val}")
+                child_indent = indent + "|   "
+                lines.extend(self._print_tree_lines(child, child_indent))
+
+        return lines
+
+
+# ============================================================
+# Main experiment logic
+# ============================================================
+
+def evaluate_tree(method_name: str,
+                  train_rows: List[Dict[str, Any]],
+                  train_labels: List[str],
+                  test_rows: List[Dict[str, Any]],
+                  test_labels: List[str],
+                  features: List[str]):
+    """Train, test, and print stats for a tree using the given method."""
+    print("=" * 60)
+    print(f"Training Decision Tree ({method_name})")
+
+    tree = DecisionTree(method=method_name)
+
+    start = time.time()
+    tree.fit(train_rows, train_labels, features.copy())
+    train_time = time.time() - start
+
+    preds = tree.predict(test_rows)
+    correct = sum(1 for p, y in zip(preds, test_labels) if p == y)
+    total = len(test_labels)
+    accuracy = correct / total if total > 0 else 0.0
+    nodes = tree.count_nodes()
+
+    # Print tree in required format
+    print("\nDecision tree:")
+    print(tree.pretty_print())
+
+    # Print evaluation results
+    print("\nTest predictions:")
+    for i, (row, pred, true) in enumerate(zip(test_rows, preds, test_labels), start=1):
+        attrs = ", ".join(f"{k}={v}" for k, v in row.items())
+        print(f"  Example {i}: ({attrs}) -> predicted={pred}, actual={true}")
+
+    print("\nStatistics:")
+    print(f"  Training time : {train_time:.6f} seconds")
+    print(f"  # of nodes    : {nodes}")
+    print(f"  Accuracy      : {correct} / {total} = {accuracy:.3f}")
+    print("=" * 60)
+    print()
+
+    return tree, accuracy, train_time, nodes
+
+
+def main():
+    # Load training and test data
+    train_rows, train_labels, features = load_dataset("trainData.csv")
+    test_rows, test_labels, _ = load_dataset("testData.csv")
+
+    print("Features:", features)
+    print("Number of training examples:", len(train_rows))
+    print("Number of test examples:", len(test_rows))
+    print()
+
+    # Evaluate with Gini Index
+    evaluate_tree("gini", train_rows, train_labels,
+                  test_rows, test_labels, features)
+
+    # Evaluate with Information Gain
+    evaluate_tree("info-gain", train_rows, train_labels,
+                  test_rows, test_labels, features)
+
+
+if __name__ == "__main__":
+    main()
